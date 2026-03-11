@@ -152,6 +152,9 @@ typedef struct pvt
 	struct ast_timer*	a_timer;			/*!< audio write timer */
 
 	char			a_write_buf[FRAME_SIZE * 5];	/*!< audio write buffer */
+	size_t			uac_write_len;			/*!< pending UAC playback bytes in a_write_buf */
+	int				uac_readpos;			/*!< accumulated UAC capture samples */
+	int				uac_readleft;			/*!< remaining UAC capture samples for a full frame */
 	struct mixbuffer	a_write_mixb;			/*!< audio mix buffer */
 //	struct ringbuffer	a_write_rb;			/*!< audio ring buffer */
 

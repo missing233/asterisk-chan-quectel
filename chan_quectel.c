@@ -92,13 +92,13 @@ static snd_pcm_t *alsa_card_init(char *dev, snd_pcm_stream_t stream,struct pvt *
 	snd_pcm_hw_params_t *hwparams = NULL;
 	snd_pcm_sw_params_t *swparams = NULL;
 	struct pollfd pfd;
-	snd_pcm_uframes_t period_size = PERIOD_FRAMES * 4;
+	snd_pcm_uframes_t period_size = DESIRED_RATE / 50;
 	snd_pcm_uframes_t buffer_size = 0;
 	unsigned int rate = DESIRED_RATE;
-	snd_pcm_uframes_t start_threshold, stop_threshold;
+	snd_pcm_uframes_t start_threshold, stop_threshold, avail_min;
 
 
-	err = snd_pcm_open(&handle, dev, stream, SND_PCM_NONBLOCK);
+	err = snd_pcm_open(&handle, dev, stream, 0);
 	if (err < 0) {
 		ast_log(LOG_ERROR, "snd_pcm_open failed: %s\n", snd_strerror(err));
 		return NULL;
@@ -135,7 +135,7 @@ static snd_pcm_t *alsa_card_init(char *dev, snd_pcm_stream_t stream,struct pvt *
 		ast_debug(1, "Period size is %d\n", err);
 	}
 
-	buffer_size = 4096 * 2;		/* period_size * 16; */
+	buffer_size = period_size * 8;
 	err = snd_pcm_hw_params_set_buffer_size_near(handle, hwparams, &buffer_size);
 	if (err < 0)
 		ast_log(LOG_WARNING, "Problem setting buffer size of %lu: %s\n", buffer_size, snd_strerror(err));
@@ -146,6 +146,13 @@ static snd_pcm_t *alsa_card_init(char *dev, snd_pcm_stream_t stream,struct pvt *
 	err = snd_pcm_hw_params(handle, hwparams);
 	if (err < 0)
 		ast_log(LOG_ERROR, "Couldn't set the new hw params: %s\n", snd_strerror(err));
+
+	direction = 0;
+	snd_pcm_hw_params_get_period_size(hwparams, &period_size, &direction);
+	snd_pcm_hw_params_get_buffer_size(hwparams, &buffer_size);
+	ast_verb(3, "ALSA %s %s: negotiated period=%lu frames buffer=%lu frames\n",
+		dev, (stream == SND_PCM_STREAM_CAPTURE) ? "capture" : "playback",
+		(unsigned long) period_size, (unsigned long) buffer_size);
 
 	swparams = ast_alloca(snd_pcm_sw_params_sizeof());
 	memset(swparams, 0, snd_pcm_sw_params_sizeof());
@@ -159,6 +166,11 @@ static snd_pcm_t *alsa_card_init(char *dev, snd_pcm_stream_t stream,struct pvt *
 	err = snd_pcm_sw_params_set_start_threshold(handle, swparams, start_threshold);
 	if (err < 0)
 		ast_log(LOG_ERROR, "start threshold: %s\n", snd_strerror(err));
+
+	avail_min = DESIRED_RATE / 50;
+	err = snd_pcm_sw_params_set_avail_min(handle, swparams, avail_min);
+	if (err < 0)
+		ast_log(LOG_ERROR, "avail_min: %s\n", snd_strerror(err));
 
 	if (stream == SND_PCM_STREAM_PLAYBACK)
 		stop_threshold = buffer_size;
@@ -174,13 +186,22 @@ static snd_pcm_t *alsa_card_init(char *dev, snd_pcm_stream_t stream,struct pvt *
 		ast_log(LOG_ERROR, "sw_params: %s\n", snd_strerror(err));
 
 	err = snd_pcm_poll_descriptors_count(handle);
-	if (err <= 0)
+	if (err <= 0) {
 		ast_log(LOG_ERROR, "Unable to get a poll descriptors count, error is %s\n", snd_strerror(err));
+		snd_pcm_close(handle);
+		return NULL;
+	}
 	if (err != 1) {
-		ast_debug(1, "Can't handle more than one device\n");
+		ast_log(LOG_ERROR, "ALSA device %s returned %d poll descriptors; only single-descriptor devices are supported by this UAC path\n", dev, err);
+		snd_pcm_close(handle);
+		return NULL;
 	}
 
-	snd_pcm_poll_descriptors(handle, &pfd, err);
+	if ((err = snd_pcm_poll_descriptors(handle, &pfd, 1)) < 0) {
+		ast_log(LOG_ERROR, "Unable to get poll descriptor for %s: %s\n", dev, snd_strerror(err));
+		snd_pcm_close(handle);
+		return NULL;
+	}
 	ast_debug(1, "Acquired fd %d from the poll descriptor\n", pfd.fd);
 
 	if (stream == SND_PCM_STREAM_CAPTURE)
@@ -207,8 +228,11 @@ static int soundcard_init(struct pvt * pvt)
 		return -1;
 	}
 	ast_verb (2, "Sound Card %s Initialized\n", CONF_UNIQ(pvt, alsadev));
-        snd_pcm_prepare(pvt->icard);
-        snd_pcm_drop(pvt->icard);
+	pvt->uac_readpos = 0;
+	pvt->uac_readleft = FRAME_SIZE2;
+	pvt->uac_write_len = 0;
+	snd_pcm_prepare(pvt->icard);
+	snd_pcm_prepare(pvt->ocard);
 
 	return writedev;}
 
